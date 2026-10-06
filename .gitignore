@@ -1,0 +1,7 @@
+.cache/
+*.apk
+main/*/*.tar.gz
+main/*/*.tar.bz2
+main/*/*.tgz
+main/*/src/
+main/*/pkg/

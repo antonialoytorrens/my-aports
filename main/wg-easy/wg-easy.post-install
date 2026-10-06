@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+rc-update add wg-easy default >/dev/null 2>&1 || true
+sysctl -p /etc/sysctl.d/wg-easy.conf >/dev/null 2>&1 || true
+
+cat <<'MSG'
+>>> wg-easy installed.
+>>> Edit /etc/conf.d/wg-easy if you need to change the defaults, then:
+>>>   rc-service wg-easy start
+>>> Make sure UDP 51820 (WireGuard) and TCP 51821 (Web UI, or whatever you
+>>> set PORT to) are reachable as needed for your setup.
+>>> IP forwarding was enabled via /etc/sysctl.d/wg-easy.conf (applied now and
+>>> on every boot) -- without it, wg-easy's iptables MASQUERADE/FORWARD rules
+>>> won't actually route any traffic.
+MSG
+
+exit 0

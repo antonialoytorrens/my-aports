@@ -1,0 +1,201 @@
+name: Build .apk
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to build (all = every package, or a package name)
+        required: true
+        default: all
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      build_matrix: ${{ steps.gen.outputs.build_matrix }}
+      publish_matrix: ${{ steps.gen.outputs.publish_matrix }}
+      has_builds: ${{ steps.gen.outputs.has_builds }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Discover packages to build
+        id: gen
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          BEFORE_SHA: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          chmod +x scripts/discover.sh scripts/retry-5xx.sh
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ "${INPUT_PACKAGE}" = "all" ] || [ -z "${INPUT_PACKAGE}" ]; then
+              mapfile -t PKGS < <(./scripts/discover.sh list)
+            else
+              PKGS=("${INPUT_PACKAGE}")
+            fi
+          else
+            mapfile -t PKGS < <(./scripts/discover.sh changed "${BEFORE_SHA}")
+          fi
+
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "No packages to build"
+            echo "has_builds=false" >> "${GITHUB_OUTPUT}"
+            echo "build_matrix=[]" >> "${GITHUB_OUTPUT}"
+            echo "publish_matrix=[]" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "Candidates: ${PKGS[*]}"
+          mapfile -t PKGS < <(./scripts/discover.sh unpublished "${PKGS[@]}")
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "All candidate packages already published for current pkgver+pkgrel"
+            echo "has_builds=false" >> "${GITHUB_OUTPUT}"
+            echo "build_matrix=[]" >> "${GITHUB_OUTPUT}"
+            echo "publish_matrix=[]" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "Packages: ${PKGS[*]}"
+          BUILD="$(./scripts/discover.sh build-matrix "${PKGS[@]}")"
+          PUBLISH="$(./scripts/discover.sh publish-matrix "${PKGS[@]}")"
+          echo "has_builds=true" >> "${GITHUB_OUTPUT}"
+          {
+            echo "build_matrix<<EOF"
+            echo "${BUILD}"
+            echo "EOF"
+            echo "publish_matrix<<EOF"
+            echo "${PUBLISH}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build ${{ matrix.package }} (${{ matrix.arch }})
+    needs: discover
+    if: needs.discover.outputs.has_builds == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.build_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        run: make "${{ matrix.target }}"
+
+      - name: Check artifacts
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          chmod +x ./scripts/discover.sh
+          mapfile -t names < <(./scripts/discover.sh pkgnames "${{ matrix.package }}")
+          found=0
+          for name in "${names[@]}"; do
+            for f in "${name}"-*.${{ matrix.arch }}.apk; do
+              [ -f "$f" ] || continue
+              ls -lh "$f"
+              found=1
+            done
+            if [ "${{ matrix.arch }}" = "x86_64" ]; then
+              for f in "${name}"-*.noarch.apk; do
+                [ -f "$f" ] || continue
+                ls -lh "$f"
+                found=1
+              done
+            fi
+          done
+          test "${found}" -eq 1
+
+      - uses: Wandalen/wretry.action@v3.8.0
+        with:
+          action: actions/upload-artifact@v7
+          attempt_limit: 21
+          attempt_delay: 0
+          pre_retry_command: bash scripts/retry-5xx.sh sleep
+          with: |
+            name: ${{ matrix.package }}-apk-${{ matrix.arch }}
+            path: "*.${{ matrix.arch }}.apk"
+            if-no-files-found: error
+
+      - uses: Wandalen/wretry.action@v3.8.0
+        if: matrix.arch == 'x86_64'
+        with:
+          action: actions/upload-artifact@v7
+          attempt_limit: 21
+          attempt_delay: 0
+          pre_retry_command: bash scripts/retry-5xx.sh sleep
+          with: |
+            name: ${{ matrix.package }}-apk-noarch
+            path: "*.noarch.apk"
+            if-no-files-found: ignore
+
+  publish:
+    name: Publish ${{ matrix.package }}
+    needs: [discover, build]
+    if: always() && !cancelled() && needs.discover.outputs.has_builds == 'true' && needs.build.result != 'cancelled'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.publish_matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Wandalen/wretry.action@v3.8.0
+        with:
+          action: actions/download-artifact@v8
+          attempt_limit: 21
+          attempt_delay: 0
+          pre_retry_command: bash scripts/retry-5xx.sh sleep
+          with: |
+            pattern: ${{ matrix.package }}-apk-*
+            merge-multiple: true
+
+      - name: Check all arch artifacts
+        id: gate
+        env:
+          EXPECTED_GLOBS: ${{ toJSON(matrix.expected_globs) }}
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+
+          expected = json.loads(os.environ["EXPECTED_GLOBS"])
+          missing = [p for p in expected if not glob.glob(p)]
+          out = os.environ["GITHUB_OUTPUT"]
+          if missing:
+              for p in missing:
+                  print(f"::warning::Missing artifact matching {p}")
+              with open(out, "a", encoding="utf-8") as f:
+                  f.write("complete=false\n")
+          else:
+              with open(out, "a", encoding="utf-8") as f:
+                  f.write("complete=true\n")
+          PY
+
+      - name: Publish ${{ matrix.package }} prerelease
+        if: steps.gate.outputs.complete == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ matrix.package }}
+        run: bash scripts/publish-prerelease.sh

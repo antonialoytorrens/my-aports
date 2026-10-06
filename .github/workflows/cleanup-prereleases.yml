@@ -1,0 +1,31 @@
+name: Cleanup old prereleases
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      keep_count:
+        description: Number of newest prereleases to keep per package
+        required: true
+        default: '3'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Keep newest prereleases per package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          KEEP_COUNT: ${{ inputs.keep_count || '3' }}
+        run: |
+          chmod +x ./scripts/cleanup-old-prereleases.sh ./scripts/retry-5xx.sh ./scripts/discover.sh
+          ./scripts/cleanup-old-prereleases.sh

@@ -1,0 +1,99 @@
+name: Check upstream versions
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to check (all = every package, or a package name)
+        required: true
+        default: all
+        type: string
+      upstream_version:
+        description: Upstream version to compare (skips remote API when set)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      has_packages: ${{ steps.gen.outputs.has_packages }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build check matrix
+        id: gen
+        env:
+          INPUT_PACKAGE: ${{ inputs.package }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          chmod +x scripts/discover.sh
+          ./scripts/discover.sh check-matrix > /tmp/check-matrix.json
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${INPUT_PACKAGE}" ] && [ "${INPUT_PACKAGE}" != "all" ]; then
+            python3 -c 'import json,sys; want=sys.argv[1]; data=json.load(open("/tmp/check-matrix.json")); json.dump([x for x in data if x["package"]==want], open("/tmp/check-matrix.json","w"))' "${INPUT_PACKAGE}"
+          fi
+          MATRIX="$(tr -d '\n' < /tmp/check-matrix.json)"
+          if [ "${MATRIX}" = "[]" ]; then
+            echo "has_packages=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_packages=true" >> "${GITHUB_OUTPUT}"
+          fi
+          {
+            echo "matrix<<EOF"
+            echo "${MATRIX}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+  check-version:
+    needs: discover
+    if: needs.discover.outputs.has_packages == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check for newer stable version
+        id: check
+        env:
+          PACKAGE: ${{ matrix.package }}
+          VERSION: ${{ inputs.upstream_version }}
+        run: |
+          chmod +x ./scripts/check-upstream-version.sh ./scripts/discover.sh ./scripts/retry-5xx.sh
+          set +e
+          NEW_VERSION="$(./scripts/check-upstream-version.sh)"
+          STATUS=$?
+          set -e
+          echo "status=${STATUS}" >> "${GITHUB_OUTPUT}"
+          if [ "${STATUS}" -eq 1 ]; then
+            echo "new_version=${NEW_VERSION}" >> "${GITHUB_OUTPUT}"
+          fi
+          exit 0
+
+      - name: Create GitHub issue for new version
+        if: steps.check.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ steps.check.outputs.new_version }}
+        run: |
+          TITLE="${{ matrix.title_prefix }} ${NEW_VERSION} available"
+          EXISTING="$(bash scripts/retry-5xx.sh gh issue list --state open --label new-version --search "${TITLE}" --json number --jq 'length')"
+          if [ "${EXISTING}" != "0" ]; then
+            echo "Issue already open for ${NEW_VERSION}, skipping."
+            exit 0
+          fi
+
+          PACKAGED="$(./scripts/discover.sh pkgver "${{ matrix.package }}")"
+          bash scripts/retry-5xx.sh gh label create new-version --description "Upstream version newer than packaged" --force 2>/dev/null || true
+          bash scripts/retry-5xx.sh gh issue create \
+            --title "${TITLE}" \
+            --label new-version \
+            --body "${{ matrix.title_prefix }} ${NEW_VERSION} is available (packaged: ${PACKAGED}). Update \`pkgver\` in \`main/${{ matrix.package }}/APKBUILD\`."

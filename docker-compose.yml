@@ -1,0 +1,10 @@
+services:
+  alpine-apk-builder:
+    build: .
+    image: my-aports-builder
+    pull_policy: build
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    volumes:
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace

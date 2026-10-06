@@ -1,0 +1,74 @@
+# Contributor: Antoni Aloy <antoni.aloytorrens@gmail.com>
+# Maintainer: Antoni Aloy <antoni.aloytorrens@gmail.com>
+pkgname=wg-easy
+pkgver=15.4.0
+pkgrel=0
+pkgdesc="WireGuard VPN + Web-based Admin UI (dockerless, OpenRC)"
+url="https://github.com/wg-easy/wg-easy"
+arch="x86_64"
+license="AGPL-3.0-or-later"
+depends="nodejs>=20 wireguard-tools iptables"
+makedepends="npm pnpm python3 build-base"
+install="$pkgname.post-install $pkgname.pre-deinstall"
+options="net" # pnpm/npm install fetch packages from the network
+subpackages=""
+source="$pkgname-$pkgver.tar.gz::https://github.com/wg-easy/wg-easy/archive/refs/tags/v$pkgver.tar.gz
+	$pkgname.initd
+	$pkgname.confd
+	$pkgname.sysctl
+	"
+builddir="$srcdir/wg-easy-$pkgver"
+
+build() {
+	cd "$builddir/src"
+	pnpm install --frozen-lockfile
+
+	# v15.4.0 we need this
+	pnpm install '@vue/devtools-api'
+
+	pnpm build
+
+	# Nitro's output tracer doesn't pick up libsql's native binding
+	# (https://github.com/nitrojs/nitro/issues/3328) -- fetch it separately
+	# into a scratch dir and merge it into .output/server/node_modules in
+	# package(), same workaround upstream's own Dockerfile applies.
+	mkdir -p "$srcdir/libsql-fetch"
+	cd "$srcdir/libsql-fetch"
+	npm install --no-save --omit=dev libsql
+}
+
+package() {
+	cd "$builddir/src"
+
+	install -d "$pkgdir/usr/lib/wg-easy"
+	cp -a .output/. "$pkgdir/usr/lib/wg-easy/"
+
+	# Nitro's output also doesn't bundle the raw migration .sql files.
+	install -d "$pkgdir/usr/lib/wg-easy/server/database/migrations"
+	cp -a server/database/migrations/. "$pkgdir/usr/lib/wg-easy/server/database/migrations/"
+
+	install -d "$pkgdir/usr/lib/wg-easy/server/node_modules"
+	cp -a "$srcdir/libsql-fetch/node_modules/." "$pkgdir/usr/lib/wg-easy/server/node_modules/"
+
+	# Remove deadweight glibc deps
+	find "$pkgdir/usr/lib/wg-easy" -type d -path '*/@libsql/*-gnu' -exec rm -rf {} +
+
+	install -d "$pkgdir/usr/bin"
+	cat >"$pkgdir/usr/bin/wg-easy-cli" <<-'EOF'
+		#!/bin/sh
+		exec node /usr/lib/wg-easy/server/cli.mjs "$@"
+	EOF
+	chmod 755 "$pkgdir/usr/bin/wg-easy-cli"
+
+	install -D -m755 "$srcdir/$pkgname.initd" "$pkgdir/etc/init.d/$pkgname"
+	install -D -m644 "$srcdir/$pkgname.confd" "$pkgdir/etc/conf.d/$pkgname"
+	install -D -m644 "$srcdir/$pkgname.sysctl" "$pkgdir/etc/sysctl.d/$pkgname.conf"
+
+	install -d -m700 "$pkgdir/etc/wireguard"
+}
+
+sha512sums="
+cd3881754689812dc18a3b49b79a373e977eb91158ae169769dfc7fa268116bc8605ad94d1bb60bbbf8d425313eaec2cfe1cb50f029b90f4a2e8c6a39739e4d8  wg-easy.initd
+bf5b4e4817e21b584a64d81973488b28b08b74ea1e53ca1c67e824a8b611de34cc79418279eaa81c2011a9b75e0f28b0c1480623259089cefe9cd69eb86ad6f8  wg-easy.confd
+c70e0c541769e6b853c88997bd3396f001b02ed57eee1ac188ca9da22cf7ff69dfd84caf24534a535ce4557bc1881f43643ebd31b0907486aa46c9ddbbbd2485  wg-easy.sysctl
+"

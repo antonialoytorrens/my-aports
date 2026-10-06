@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+name="wg-easy"
+description="wg-easy (WireGuard + Web UI)"
+
+command="/usr/bin/node"
+command_args="/usr/lib/wg-easy/server/index.mjs"
+command_background="yes"
+command_user="root"
+directory="/usr/lib/wg-easy"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net
+	after firewall
+}

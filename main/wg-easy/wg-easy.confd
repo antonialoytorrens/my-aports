@@ -1,0 +1,7 @@
+# wg-easy runtime configuration. Edit and `rc-service wg-easy restart`.
+export PORT=51821
+export HOST=0.0.0.0
+export INSECURE=false
+export DISABLE_IPV6=false
+export INIT_ENABLED=false
+export DEBUG=Server,WireGuard,Database,CMD,Firewall
