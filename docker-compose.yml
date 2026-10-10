@@ -1,6 +1,23 @@
 services:
+  ci:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ci
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    env_file:
+      - .env
+    environment:
+      - SONAR_TOKEN
+      - SONAR_HOST_URL
+      - SONAR_PROJECT_KEY
   alpine-apk-builder:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
     image: my-aports-builder
     pull_policy: build
     platform: ${DOCKER_PLATFORM:-linux/amd64}
@@ -8,3 +25,4 @@ services:
       - .:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /workspace
+

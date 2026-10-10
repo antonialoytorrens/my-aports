@@ -69,3 +69,16 @@ $(addprefix docker-,$(MAKE_TARGETS)):
 	  *) echo "ERROR: unknown docker target '$$target'"; exit 1 ;; \
 	esac; \
 	DOCKER_PLATFORM=$$platform $(COMPOSE) run --rm $(SERVICE) make $$target
+
+# --- SonarQube ---
+ifneq (,$(wildcard ./.env))
+include .env
+export
+endif
+
+.PHONY: sonarqube
+sonarqube:
+	sonar-scanner \
+		-Dsonar.token=$(SONAR_TOKEN) \
+		-Dsonar.host.url=$(SONAR_HOST_URL) \
+		-Dsonar.projectKey=$(SONAR_PROJECT_KEY)

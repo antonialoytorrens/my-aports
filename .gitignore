@@ -5,3 +5,4 @@ main/*/*.tar.bz2
 main/*/*.tgz
 main/*/src/
 main/*/pkg/
+.env
